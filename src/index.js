@@ -2,7 +2,7 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // 0-0. [新規追加] メタデータ定義の直接登録エンドポイント（認証不要・入力不要）
+    // 0-0. メタデータ定義の直接登録エンドポイント（認証不要・入力不要）
     if (url.pathname === "/register-metadata") {
       try {
         await registerRoleConnectionMetadata(env);
@@ -173,18 +173,19 @@ export default {
         const tokenData = await getDiscordTokenWithUri(code, env, env.DISCORD_REDIRECT_URI);
         const discordUser = await getDiscordUser(tokenData.access_token);
 
-        const lastActiveAt = await getGitHubLastActiveDateGraphQL(githubUsername, githubAccessToken);
+        // GitHub メトリクス（草・フォロワー・スター・リポジトリ・年間貢献数）を一括取得
+        const githubMetrics = await getGitHubUserMetricsGraphQL(githubUsername, githubAccessToken);
         
         const now = Date.now();
         const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
         
         let isActive = false;
-        if (lastActiveAt) {
-          const lastActiveTime = new Date(lastActiveAt).getTime();
+        if (githubMetrics.lastActiveAt) {
+          const lastActiveTime = new Date(githubMetrics.lastActiveAt).getTime();
           isActive = (now - lastActiveTime) <= thirtyDaysMs && lastActiveTime <= now;
         }
 
-        const saveDate = lastActiveAt || new Date(0).toISOString();
+        const saveDate = githubMetrics.lastActiveAt || new Date(0).toISOString();
 
         await env.DB.prepare(`
           INSERT INTO users (discord_id, access_token, refresh_token, github_username, github_access_token, last_active_at, warned_at)
@@ -198,7 +199,14 @@ export default {
             warned_at = NULL
         `).bind(discordUser.id, tokenData.access_token, tokenData.refresh_token, githubUsername, githubAccessToken, saveDate).run();
 
-        await updateDiscordRoleConnection(tokenData.access_token, env.DISCORD_CLIENT_ID, githubUsername, isActive);
+        // Discord の Linked Role メタデータを一気に更新
+        await updateDiscordRoleConnection(
+          tokenData.access_token,
+          env.DISCORD_CLIENT_ID,
+          githubUsername,
+          isActive,
+          githubMetrics
+        );
 
         return new Response(`
           <html>
@@ -229,26 +237,34 @@ export default {
 
     for (const user of users) {
       try {
-        const lastActiveAt = await getGitHubLastActiveDateGraphQL(user.github_username, user.github_access_token);
+        const githubMetrics = await getGitHubUserMetricsGraphQL(user.github_username, user.github_access_token);
         
-        const lastActiveTime = lastActiveAt ? new Date(lastActiveAt).getTime() : 0;
+        const lastActiveTime = githubMetrics.lastActiveAt ? new Date(githubMetrics.lastActiveAt).getTime() : 0;
         const isActive = (now - lastActiveTime) <= thirtyDaysMs && lastActiveTime > 0;
 
         const daysInactive = Math.floor((now - lastActiveTime) / (1000 * 60 * 60 * 24));
         const remainingDays = 30 - daysInactive;
 
+        // 全てのメタデータを更新
+        await updateDiscordRoleConnection(
+          user.access_token,
+          env.DISCORD_CLIENT_ID,
+          user.github_username,
+          isActive,
+          githubMetrics
+        );
+
         if (!isActive) {
-          await updateDiscordRoleConnection(user.access_token, env.DISCORD_CLIENT_ID, user.github_username, false);
           await sendDirectMessage(
             env.DISCORD_BOT_TOKEN,
             user.discord_id,
-            "【通知】GitHubで30日以上アクティビティが確認できなかったため、連携ロールを自動解除しました。"
+            "【通知】GitHubで30日以上アクティビティが確認できなかったため、アクティブ条件を満たさなくなりました。"
           );
           continue;
         }
 
         if (remainingDays <= 5 && remainingDays >= 0 && !user.warned_at) {
-          const message = `【警告】GitHubのアクティビティが低下しています。\nあと **${remainingDays}日** 以内にコミットなどの活動がない場合、Discordの連携ロールが自動解除されます。\n（対象アカウント: ${user.github_username}）`;
+          const message = `【警告】GitHubのアクティビティが低下しています。\nあと **${remainingDays}日** 以内にコミットなどの活動がない場合、Discordのアクティブ判定が解除されます。\n（対象アカウント: ${user.github_username}）`;
           
           const sent = await sendDirectMessage(env.DISCORD_BOT_TOKEN, user.discord_id, message);
           if (sent) {
@@ -287,7 +303,7 @@ function getPrivacyHtml() {
         <p>当サービスは、本サービスの提供にあたり、以下の情報を取得・利用します。</p>
         <ul>
           <li><strong>Discordに関する情報:</strong> Discord ユーザーID、ユーザー名、アクセストークンおよびリフレッシュトークン</li>
-          <li><strong>GitHubに関する情報:</strong> GitHub ユーザー名、アクセストークン、および公開・非公開を含む草（コントリビューション）の最終アクティブ日時</li>
+          <li><strong>GitHubに関する情報:</strong> GitHub ユーザー名、アクセストークン、フォロワー数、所有リポジトリの獲得スター総数、パブリックリポジトリ数、過去1年間の総コントリビューション数、および最終アクティブ日時</li>
           <li><strong>アクセスログおよび運用管理情報:</strong> システム利用履歴、エラーログ、警告通知の送信履歴（<code>warned_at</code> 等）</li>
         </ul>
 
@@ -295,7 +311,7 @@ function getPrivacyHtml() {
         <p>当サービスは、取得した情報を以下の目的で利用します。</p>
         <ol>
           <li>ユーザーの識別およびDiscordアカウントとGitHubアカウントの連携処理のため</li>
-          <li>GitHubでのアクティビティに基づき、Discordのロール（Linked Role）メタデータを自動更新・管理するため</li>
+          <li>GitHubでのアクティビティや各種メトリクス（草・フォロワー数・スター数・リポジトリ数等）に基づき、Discordのロール（Linked Role）メタデータを自動更新・管理するため</li>
           <li>非アクティブ状態時の警告通知およびロール自動解除通知をDiscord DMにて送信するため</li>
           <li>当サービスの維持、管理、障害対応および品質向上のため</li>
           <li>お問い合わせへの対応のため</li>
@@ -325,7 +341,7 @@ function getPrivacyHtml() {
         <h3>8. お問い合わせ窓口</h3>
         <p>サポートサーバー: https://discord.gg/XdGrtFSbQ6</p>
         <p><strong>事業者／運営者名:</strong> ミナミイワトビペンギン</p>
-        <p>（制定日：2026年9月5日）</p>
+        <p>（改定日：2026年9月5日）</p>
       </body>
     </html>
   `;
@@ -354,8 +370,8 @@ function getTermsHtml() {
         <p>2. ユーザーは、本サービスを利用（GitHubおよびDiscordの連携認証を行うことを含みます）することにより、本規約に同意したものとみなされます。</p>
 
         <h3>第2条（連携機能およびロール更新）</h3>
-        <p>1. 本サービスは、ユーザーのGitHubアクティビティ（過去30日以内のコミットやコントリビューション等）を取得し、Discordのロール付与条件（Linked Role）を自動更新します。</p>
-        <p>2. 30日以上GitHubでのアクティビティが確認できない場合、Discord側のロールが自動的に解除されることがあります。</p>
+        <p>1. 本サービスは、ユーザーのGitHubアクティビティ（過去30日以内のコントリビューション等）やアカウント統計情報（フォロワー数、獲得スター数、リポジトリ数など）を取得し、Discordのロール付与条件（Linked Role）を自動更新します。</p>
+        <p>2. 各Discordサーバーの管理者が設定した条件（アクティブ状態、フォロワー数、スター数等）を満たさなくなった場合、該当するロールが自動的に解除されることがあります。</p>
 
         <h3>第3条（禁止事項）</h3>
         <p>ユーザーは、本サービスの利用にあたり、以下の行為をしてはなりません。</p>
@@ -387,7 +403,7 @@ function getTermsHtml() {
         <p>1. 本規約の解釈にあたっては、日本法を準拠法とします。</p>
         <p>2. 本サービスに関して紛争が生じた場合、運営者の所在地を管轄する裁判所を専属的合意管轄とします。</p>
 
-        <p>（制定日：2026年9月5日）</p>
+        <p>（改定日：2026年9月5日）</p>
       </body>
     </html>
   `;
@@ -395,14 +411,39 @@ function getTermsHtml() {
 
 /* --- ヘルパー関数群 --- */
 
+// Discord サーバー管理者がロール付与条件として選べる項目（メタデータ）を登録
 async function registerRoleConnectionMetadata(env) {
   const url = `https://discord.com/api/v10/applications/${env.DISCORD_CLIENT_ID}/role-connections/metadata`;
   const body = [
     {
       key: "active_within_30days",
       name: "30日以内のGitHubアクティビティ",
-      description: "直近30日以内にGitHubで活動があるか",
-      type: 7
+      description: "直近30日以内にGitHubで草が生えているか",
+      type: 7 // Boolean Equals
+    },
+    {
+      key: "followers_count",
+      name: "フォロワー数",
+      description: "GitHubのフォロワー数",
+      type: 2 // Integer Greater Than or Equal
+    },
+    {
+      key: "total_stars",
+      name: "獲得スター総数",
+      description: "所有している公開リポジトリの獲得スター総数",
+      type: 2 // Integer Greater Than or Equal
+    },
+    {
+      key: "public_repos",
+      name: "パブリックリポジトリ数",
+      description: "公開されているリポジトリの数",
+      type: 2 // Integer Greater Than or Equal
+    },
+    {
+      key: "yearly_contributions",
+      name: "年間コントリビューション数",
+      description: "過去1年間の総草（コントリビューション）数",
+      type: 2 // Integer Greater Than or Equal
     }
   ];
 
@@ -421,14 +462,33 @@ async function registerRoleConnectionMetadata(env) {
   }
 }
 
-async function getGitHubLastActiveDateGraphQL(username, accessToken) {
-  if (!accessToken) return null;
+// GitHub GraphQL API で全メトリクスを一括取得
+async function getGitHubUserMetricsGraphQL(username, accessToken) {
+  const emptyResult = {
+    lastActiveAt: null,
+    followersCount: 0,
+    totalStars: 0,
+    publicRepos: 0,
+    yearlyContributions: 0
+  };
+
+  if (!accessToken) return emptyResult;
 
   const query = `
     query($username: String!) {
       user(login: $username) {
+        followers {
+          totalCount
+        }
+        repositories(first: 100, ownerAffiliations: OWNER, privacy: PUBLIC) {
+          totalCount
+          nodes {
+            stargazerCount
+          }
+        }
         contributionsCollection {
           contributionCalendar {
+            totalContributions
             weeks {
               contributionDays {
                 date
@@ -452,13 +512,25 @@ async function getGitHubLastActiveDateGraphQL(username, accessToken) {
       body: JSON.stringify({ query, variables: { username } }),
     });
 
-    if (!res.ok) return null;
+    if (!res.ok) return emptyResult;
 
     const resData = await res.json();
-    const weeks = resData.data?.user?.contributionsCollection?.contributionCalendar?.weeks;
+    const user = resData.data?.user;
+    if (!user) return emptyResult;
 
-    if (!weeks) return null;
+    // 1. フォロワー数 & リポジトリ数
+    const followersCount = user.followers?.totalCount || 0;
+    const publicRepos = user.repositories?.totalCount || 0;
 
+    // 2. スター総数の合算 (最大100リポジトリ)
+    const totalStars = (user.repositories?.nodes || []).reduce((sum, repo) => sum + repo.stargazerCount, 0);
+
+    // 3. 1年間の総コントリビューション数
+    const calendar = user.contributionsCollection?.contributionCalendar;
+    const yearlyContributions = calendar?.totalContributions || 0;
+
+    // 4. 最終アクティブ日時の計算
+    const weeks = calendar?.weeks || [];
     let lastActiveDate = null;
     for (let i = weeks.length - 1; i >= 0; i--) {
       const days = weeks[i].contributionDays;
@@ -471,10 +543,17 @@ async function getGitHubLastActiveDateGraphQL(username, accessToken) {
       if (lastActiveDate) break;
     }
 
-    return lastActiveDate;
+    return {
+      lastActiveAt: lastActiveDate,
+      followersCount,
+      totalStars,
+      publicRepos,
+      yearlyContributions
+    };
+
   } catch (e) {
     console.error(`GitHub GraphQL API Error: ${e.message}`);
-    return null;
+    return emptyResult;
   }
 }
 
@@ -507,7 +586,7 @@ async function getDiscordUser(accessToken) {
   return await res.json();
 }
 
-async function updateDiscordRoleConnection(accessToken, clientId, githubUsername, isActive) {
+async function updateDiscordRoleConnection(accessToken, clientId, githubUsername, isActive, metrics) {
   const res = await fetch(`https://discord.com/api/v10/users/@me/applications/${clientId}/role-connection`, {
     method: "PUT",
     headers: {
@@ -518,7 +597,11 @@ async function updateDiscordRoleConnection(accessToken, clientId, githubUsername
       platform_name: "GitHub",
       platform_username: githubUsername,
       metadata: {
-        active_within_30days: isActive ? 1 : 0
+        active_within_30days: isActive ? 1 : 0,
+        followers_count: metrics.followersCount,
+        total_stars: metrics.totalStars,
+        public_repos: metrics.publicRepos,
+        yearly_contributions: metrics.yearlyContributions
       },
     }),
   });
