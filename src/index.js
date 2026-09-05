@@ -310,7 +310,7 @@ function getPrivacyHtml() {
         <p>当サービスは、必要に応じて本ポリシーを変更することがあります。変更後のポリシーは、当サービス上に掲載した時点から効力を生じるものとします。</p>
 
         <h3>8. お問い合わせ窓口</h3>
-        <p>サポートサーバー:https://discord.gg/XdGrtFSbQ6</p>
+        <p>サポートサーバー: https://discord.gg/XdGrtFSbQ6</p>
         <p><strong>事業者／運営者名:</strong> ミナミイワトビペンギン</p>
         <p>（制定日：2026年9月5日）</p>
       </body>
@@ -343,7 +343,6 @@ function getTermsHtml() {
         <h3>第2条（連携機能およびロール更新）</h3>
         <p>1. 本サービスは、ユーザーのGitHubアクティビティ（過去30日以内のコミットやコントリビューション等）を取得し、Discordのロール付与条件（Linked Role）を自動更新します。</p>
         <p>2. 30日以上GitHubでのアクティビティが確認できない場合、Discord側のロールが自動的に解除されることがあります。</p>
-        <p>3. 連携の成功およびロール付与を永久に保証するものではありません。</p>
 
         <h3>第3条（禁止事項）</h3>
         <p>ユーザーは、本サービスの利用にあたり、以下の行為をしてはなりません。</p>
@@ -451,7 +450,8 @@ async function getGitHubLastActiveDateGraphQL(username, accessToken) {
       const days = weeks[i].contributionDays;
       for (let j = days.length - 1; j >= 0; j--) {
         if (days[j].contributionCount > 0) {
-          lastActiveDate = `${days[j].date}T23:59:59.000Z`;
+          // 日本時間 (JST) の 23:59:59 として指定（+09:00 を付与してUTC未来判定を防ぐ）
+          lastActiveDate = `${days[j].date}T23:59:59.000+09:00`;
           break;
         }
       }
