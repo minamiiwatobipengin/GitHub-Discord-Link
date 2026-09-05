@@ -11,13 +11,19 @@ export default {
       return Response.redirect(githubAuthUrl, 302);
     }
 
-    // 2. GitHub コールバック処理 ➔ トークン取得 ➔ Discord 認証へリダイレクト
+    // ★追加: 連携解除用URL (/unlink)
+    if (url.pathname === "/unlink") {
+      // 本来はDiscord OAuth認証を経由させるか、指定のクエリ等で処理します
+      // ここでは連携解除の案内またはマイページリダイレクト
+      return new Response("連携解除は Discord の「設定 ＞ 連携アカウント」から削除を行うか、再度連携し直してください。", { status: 200 });
+    }
+
+    // 2. GitHub コールバック処理
     if (url.pathname === "/github-callback") {
       const code = url.searchParams.get("code");
       if (!code) return new Response("GitHub Codeが取得できませんでした", { status: 400 });
 
       try {
-        // GitHubアクセストークン取得
         const tokenRes = await fetch("https://github.com/login/oauth/access_token", {
           method: "POST",
           headers: {
@@ -34,7 +40,6 @@ export default {
         const tokenData = await tokenRes.json();
         if (!tokenData.access_token) throw new Error("GitHubトークンの取得に失敗しました");
 
-        // GitHub ユーザー名取得
         const userRes = await fetch("https://api.github.com/user", {
           headers: {
             "Authorization": `Bearer ${tokenData.access_token}`,
@@ -44,7 +49,6 @@ export default {
         const githubUser = await userRes.json();
         const githubUsername = githubUser.login;
 
-        // 次のDiscord認証へ渡すため state に情報を格納
         const stateData = JSON.stringify({
           username: githubUsername,
           token: tokenData.access_token
@@ -73,19 +77,22 @@ export default {
         const tokenData = await getDiscordToken(code, env);
         const discordUser = await getDiscordUser(tokenData.access_token);
 
-        // GraphQL APIで最終活動日（草が生えた日）を取得
+        // GraphQL APIで最終活動日を取得
         const lastActiveAt = await getGitHubLastActiveDateGraphQL(githubUsername, githubAccessToken);
+        
+        const now = Date.now();
+        const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
         
         let isActive = false;
         if (lastActiveAt) {
           const lastActiveTime = new Date(lastActiveAt).getTime();
-          const thirtyDaysAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
-          isActive = lastActiveTime > thirtyDaysAgo;
+          // 「現在時刻 - 30日」以降に草が生えている場合のみ active
+          isActive = (now - lastActiveTime) <= thirtyDaysMs && lastActiveTime <= now;
         }
 
         const saveDate = lastActiveAt || new Date(0).toISOString();
 
-        // D1 へ保存 (github_access_token も保存)
+        // D1 へ保存
         await env.DB.prepare(`
           INSERT INTO users (discord_id, access_token, refresh_token, github_username, github_access_token, last_active_at, warned_at)
           VALUES (?, ?, ?, ?, ?, ?, NULL)
@@ -117,20 +124,20 @@ export default {
     ctx.waitUntil(registerRoleConnectionMetadata(env));
 
     const { results: users } = await env.DB.prepare("SELECT * FROM users").all();
+    const now = Date.now();
+    const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
 
     for (const user of users) {
       try {
-        // 保存しておいた GitHub Access Token で GraphQL API を実行
         const lastActiveAt = await getGitHubLastActiveDateGraphQL(user.github_username, user.github_access_token);
         
         const lastActiveTime = lastActiveAt ? new Date(lastActiveAt).getTime() : 0;
-        const thirtyDaysAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
-        const isActive = lastActiveTime > thirtyDaysAgo;
+        const isActive = (now - lastActiveTime) <= thirtyDaysMs && lastActiveTime > 0;
 
-        const daysInactive = getDaysDifference(new Date(lastActiveTime), new Date());
+        const daysInactive = Math.floor((now - lastActiveTime) / (1000 * 60 * 60 * 24));
         const remainingDays = 30 - daysInactive;
 
-        // 30日以上非アクティブ（1970年等データなし含む）➔ ロール解除 ＆ DM通知
+        // 30日以上非アクティブ ➔ ロール解除 ＆ DM通知
         if (!isActive) {
           await updateDiscordRoleConnection(user.access_token, env.DISCORD_CLIENT_ID, user.github_username, false);
           await sendDirectMessage(
@@ -142,7 +149,7 @@ export default {
         }
 
         // 残り5日以下 ＆ 未警告 ➔ 警告DM送信
-        if (remainingDays <= 5 && !user.warned_at) {
+        if (remainingDays <= 5 && remainingDays >= 0 && !user.warned_at) {
           const message = `【警告】GitHubのアクティビティが低下しています。\nあと **${remainingDays}日** 以内にコミットなどの活動がない場合、Discordの連携ロールが自動解除されます。\n（対象アカウント: ${user.github_username}）`;
           
           const sent = await sendDirectMessage(env.DISCORD_BOT_TOKEN, user.discord_id, message);
@@ -160,7 +167,6 @@ export default {
 
 /* --- ヘルパー関数群 --- */
 
-// Discord Role Connection メタデータの自動登録
 async function registerRoleConnectionMetadata(env) {
   try {
     const url = `https://discord.com/api/v10/applications/${env.DISCORD_CLIENT_ID}/role-connections/metadata`;
@@ -169,7 +175,7 @@ async function registerRoleConnectionMetadata(env) {
         key: "active_within_30days",
         name: "30日以内のGitHubアクティビティ",
         description: "直近30日以内にGitHubで活動があるか",
-        type: 7 // Boolean
+        type: 7
       }
     ];
 
@@ -186,7 +192,6 @@ async function registerRoleConnectionMetadata(env) {
   }
 }
 
-// GitHub GraphQL API で草（コントリビューション）の最新日付を取得
 async function getGitHubLastActiveDateGraphQL(username, accessToken) {
   if (!accessToken) return null;
 
@@ -225,13 +230,13 @@ async function getGitHubLastActiveDateGraphQL(username, accessToken) {
 
     if (!weeks) return null;
 
-    // 最新の日付から逆順にルックアップし、草が1つ以上生えている日を探す
     let lastActiveDate = null;
     for (let i = weeks.length - 1; i >= 0; i--) {
       const days = weeks[i].contributionDays;
       for (let j = days.length - 1; j >= 0; j--) {
         if (days[j].contributionCount > 0) {
-          lastActiveDate = `${days[j].date}T00:00:00.000Z`;
+          // 当日の終わりの時間（23:59:59）としてパースさせることで日時の誤差を防止
+          lastActiveDate = `${days[j].date}T23:59:59.000Z`;
           break;
         }
       }
@@ -272,10 +277,6 @@ async function getDiscordUser(accessToken) {
   });
   if (!res.ok) throw new Error("Discordユーザー情報の取得に失敗しました");
   return await res.json();
-}
-
-function getDaysDifference(d1, d2) {
-  return Math.floor((d2 - d1) / (1000 * 60 * 60 * 24));
 }
 
 async function updateDiscordRoleConnection(accessToken, clientId, githubUsername, isActive) {
