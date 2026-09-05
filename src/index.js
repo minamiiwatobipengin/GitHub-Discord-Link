@@ -1,6 +1,9 @@
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
+
+    // メタデータ定義の自動登録（バックグラウンドで実行）
+    ctx.waitUntil(registerRoleConnectionMetadata(env));
 
     // 1. GitHub OAuth2 認証開始
     if (url.pathname === "/linked-role") {
@@ -14,7 +17,6 @@ export default {
       if (!code) return new Response("GitHub Codeが取得できませんでした", { status: 400 });
 
       try {
-        // GitHubアクセストークン取得
         const tokenRes = await fetch("https://github.com/login/oauth/access_token", {
           method: "POST",
           headers: {
@@ -31,7 +33,6 @@ export default {
         const tokenData = await tokenRes.json();
         if (!tokenData.access_token) throw new Error("GitHubトークン取得失敗");
 
-        // GitHubユーザー情報取得
         const userRes = await fetch("https://api.github.com/user", {
           headers: {
             "Authorization": `Bearer ${tokenData.access_token}`,
@@ -41,7 +42,6 @@ export default {
         const githubUser = await userRes.json();
         const githubUsername = githubUser.login;
 
-        // GitHubユーザー名を state に保持して Discord 認証へリダイレクト
         const discordAuthUrl = `https://discord.com/oauth2/authorize?client_id=${env.DISCORD_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(env.DISCORD_REDIRECT_URI)}&scope=role_connections.write%20identify&state=${encodeURIComponent(githubUsername)}`;
         return Response.redirect(discordAuthUrl, 302);
 
@@ -53,23 +53,20 @@ export default {
     // 3. Discord OAuth2 コールバック処理
     if (url.pathname === "/callback") {
       const code = url.searchParams.get("code");
-      const githubUsername = url.searchParams.get("state"); // state から取得
+      const githubUsername = url.searchParams.get("state");
 
       if (!code || !githubUsername) {
         return new Response("パラメータが不足しています", { status: 400 });
       }
 
       try {
-        // Discordのトークン & ユーザーID取得
         const tokenData = await getDiscordToken(code, env);
         const discordUser = await getDiscordUser(tokenData.access_token);
 
-        // GitHubアクティビティチェック
         const lastActiveAt = await getGitHubLastActiveDate(githubUsername);
         const daysInactive = getDaysDifference(new Date(lastActiveAt), new Date());
         const isActive = daysInactive < 30;
 
-        // Cloudflare D1 に保存
         await env.DB.prepare(`
           INSERT INTO users (discord_id, access_token, refresh_token, github_username, last_active_at, warned_at)
           VALUES (?, ?, ?, ?, ?, NULL)
@@ -81,10 +78,8 @@ export default {
             warned_at = NULL
         `).bind(discordUser.id, tokenData.access_token, tokenData.refresh_token, githubUsername, lastActiveAt).run();
 
-        // Discord Role Connection 更新
         await updateDiscordRoleConnection(tokenData.access_token, env.DISCORD_CLIENT_ID, githubUsername, isActive);
 
-        // 指定のDiscordチャンネルへリダイレクト
         const discordChannelUrl = `https://discord.com/channels/${env.TARGET_GUILD_ID}/${env.TARGET_CHANNEL_ID}`;
         return Response.redirect(discordChannelUrl, 302);
 
@@ -96,8 +91,10 @@ export default {
     return new Response("Not Found", { status: 404 });
   },
 
-  // 4. 定時バッチ処理 (変更なし)
+  // 4. 定時バッチ処理
   async scheduled(event, env, ctx) {
+    ctx.waitUntil(registerRoleConnectionMetadata(env));
+
     const { results: users } = await env.DB.prepare("SELECT * FROM users").all();
 
     for (const user of users) {
@@ -134,7 +131,32 @@ export default {
 
 /* --- API通信・処理用ヘルパー関数群 --- */
 
-// 「フォームボディ無効」エラーを防ぐために修正した関数
+// ★ 追加: メタデータ定義をDiscord APIに自動登録する関数
+async function registerRoleConnectionMetadata(env) {
+  try {
+    const url = `https://discord.com/api/v10/applications/${env.DISCORD_CLIENT_ID}/role-connections/metadata`;
+    const body = [
+      {
+        key: "active_within_30days",
+        name: "30日以内のGitHubアクティビティ",
+        description: "直近30日以内にGitHubで活動があるか",
+        type: 7 // Boolean (0 or 1)
+      }
+    ];
+
+    await fetch(url, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    console.error("Failed to register role connection metadata:", e);
+  }
+}
+
 async function getDiscordToken(code, env) {
   const params = new URLSearchParams();
   params.append("client_id", env.DISCORD_CLIENT_ID);
@@ -145,9 +167,7 @@ async function getDiscordToken(code, env) {
 
   const res = await fetch("https://discord.com/api/v10/oauth2/token", {
     method: "POST",
-    headers: { 
-      "Content-Type": "application/x-www-form-urlencoded"
-    },
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: params.toString(),
   });
 
