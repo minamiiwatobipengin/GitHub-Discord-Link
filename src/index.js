@@ -1,7 +1,20 @@
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    if (url.pathname === "/link") {
+      return new Response(`
+          <html>
+            <body style="font-family: sans-serif; text-align: center; padding-top: 50px;">
+              <h2>利用規約・プライバシーポリシー</h2>
+              <p><a href="https://github.com/minamiiwatobipengin/GitHub-Discord-Link/tree/main">利用規約・プライバシーポリシー</a></p>
+              <p><a href="https://github-discord-link.iwatobi.workers.dev/linked-role">同意する</a></p>
+            </body>
+          </html>
+        `, {
+          headers: { "Content-Type": "text/html; charset=utf-8" }
+        });
 
+    }
     // Discordロールメタデータ定義の自動登録
     ctx.waitUntil(registerRoleConnectionMetadata(env));
 
