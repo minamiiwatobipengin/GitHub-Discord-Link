@@ -136,8 +136,16 @@ export default {
 
         await updateDiscordRoleConnection(tokenData.access_token, env.DISCORD_CLIENT_ID, githubUsername, isActive);
 
-        const discordChannelUrl = `https://discord.com/channels/${env.TARGET_GUILD_ID}/${env.TARGET_CHANNEL_ID}`;
-        return Response.redirect(discordChannelUrl, 302);
+        return new Response(`
+          <html>
+            <body style="font-family: sans-serif; text-align: center; padding-top: 50px;">
+              <h2>連携完了</h2>
+              <p>このタブを安全に閉じることができます</p>
+            </body>
+          </html>
+        `, {
+          headers: { "Content-Type": "text/html; charset=utf-8" }
+        });
 
       } catch (err) {
         return new Response(`認証エラーが発生しました: ${err.message}`, { status: 500 });
