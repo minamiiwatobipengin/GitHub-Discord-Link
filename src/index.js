@@ -11,11 +11,43 @@ export default {
       return Response.redirect(githubAuthUrl, 302);
     }
 
-    // ★追加: 連携解除用URL (/unlink)
+    // ★追加: 連携解除の処理開始（Discord認証へ飛ばしてユーザー識別を行う）
     if (url.pathname === "/unlink") {
-      // 本来はDiscord OAuth認証を経由させるか、指定のクエリ等で処理します
-      // ここでは連携解除の案内またはマイページリダイレクト
-      return new Response("連携解除は Discord の「設定 ＞ 連携アカウント」から削除を行うか、再度連携し直してください。", { status: 200 });
+      const unlinkRedirectUri = `${url.origin}/unlink-callback`;
+      const discordAuthUrl = `https://discord.com/oauth2/authorize?client_id=${env.DISCORD_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(unlinkRedirectUri)}&scope=role_connections.write%20identify`;
+      return Response.redirect(discordAuthUrl, 302);
+    }
+
+    // ★追加: 連携解除のコールバック処理（実際にAPI削除＋DB削除を実行）
+    if (url.pathname === "/unlink-callback") {
+      const code = url.searchParams.get("code");
+      if (!code) return new Response("認証コードがありません", { status: 400 });
+
+      try {
+        const unlinkRedirectUri = `${url.origin}/unlink-callback`;
+        const tokenData = await getDiscordTokenWithUri(code, env, unlinkRedirectUri);
+        const discordUser = await getDiscordUser(tokenData.access_token);
+
+        // 1. Discord 側の連携ロールメタデータを削除 (DELETE)
+        await deleteDiscordRoleConnection(tokenData.access_token, env.DISCORD_CLIENT_ID);
+
+        // 2. D1 データベースから該当ユーザーを削除
+        await env.DB.prepare("DELETE FROM users WHERE discord_id = ?").bind(discordUser.id).run();
+
+        return new Response(`
+          <html>
+            <body style="font-family: sans-serif; text-align: center; padding-top: 50px;">
+              <h2>連携を完全に解除しました</h2>
+              <p>GitHubとの連携データおよびDiscordのロール条件を削除しました。</p>
+            </body>
+          </html>
+        `, {
+          headers: { "Content-Type": "text/html; charset=utf-8" }
+        });
+
+      } catch (err) {
+        return new Response(`連携解除エラー: ${err.message}`, { status: 500 });
+      }
     }
 
     // 2. GitHub コールバック処理
@@ -54,7 +86,7 @@ export default {
           token: tokenData.access_token
         });
 
-        const discordAuthUrl = `https://discord.com/oauth2/authorize?client_id=${env.DISCORD_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(env.DISCORD_REDIRECT_URI)}&scope=role_connections.write%20identify&state=${encodeURIComponent(stateData)}`;
+        const discordAuthUrl = `https://discord.com/oauth2/authorize?client_id=${env.DISCORD_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(env.DISCORD_REDIRECT_URI)}&scope=role_connections.write\%20identify&state=${encodeURIComponent(stateData)}`;
         return Response.redirect(discordAuthUrl, 302);
 
       } catch (err) {
@@ -62,7 +94,7 @@ export default {
       }
     }
 
-    // 3. Discord OAuth2 コールバック処理
+    // 3. Discord OAuth2 コールバック処理（連携保存）
     if (url.pathname === "/callback") {
       const code = url.searchParams.get("code");
       const stateRaw = url.searchParams.get("state");
@@ -74,10 +106,9 @@ export default {
       try {
         const { username: githubUsername, token: githubAccessToken } = JSON.parse(stateRaw);
 
-        const tokenData = await getDiscordToken(code, env);
+        const tokenData = await getDiscordTokenWithUri(code, env, env.DISCORD_REDIRECT_URI);
         const discordUser = await getDiscordUser(tokenData.access_token);
 
-        // GraphQL APIで最終活動日を取得
         const lastActiveAt = await getGitHubLastActiveDateGraphQL(githubUsername, githubAccessToken);
         
         const now = Date.now();
@@ -86,13 +117,11 @@ export default {
         let isActive = false;
         if (lastActiveAt) {
           const lastActiveTime = new Date(lastActiveAt).getTime();
-          // 「現在時刻 - 30日」以降に草が生えている場合のみ active
           isActive = (now - lastActiveTime) <= thirtyDaysMs && lastActiveTime <= now;
         }
 
         const saveDate = lastActiveAt || new Date(0).toISOString();
 
-        // D1 へ保存
         await env.DB.prepare(`
           INSERT INTO users (discord_id, access_token, refresh_token, github_username, github_access_token, last_active_at, warned_at)
           VALUES (?, ?, ?, ?, ?, ?, NULL)
@@ -105,7 +134,6 @@ export default {
             warned_at = NULL
         `).bind(discordUser.id, tokenData.access_token, tokenData.refresh_token, githubUsername, githubAccessToken, saveDate).run();
 
-        // Discord の Linked Role を更新
         await updateDiscordRoleConnection(tokenData.access_token, env.DISCORD_CLIENT_ID, githubUsername, isActive);
 
         const discordChannelUrl = `https://discord.com/channels/${env.TARGET_GUILD_ID}/${env.TARGET_CHANNEL_ID}`;
@@ -137,7 +165,6 @@ export default {
         const daysInactive = Math.floor((now - lastActiveTime) / (1000 * 60 * 60 * 24));
         const remainingDays = 30 - daysInactive;
 
-        // 30日以上非アクティブ ➔ ロール解除 ＆ DM通知
         if (!isActive) {
           await updateDiscordRoleConnection(user.access_token, env.DISCORD_CLIENT_ID, user.github_username, false);
           await sendDirectMessage(
@@ -148,7 +175,6 @@ export default {
           continue;
         }
 
-        // 残り5日以下 ＆ 未警告 ➔ 警告DM送信
         if (remainingDays <= 5 && remainingDays >= 0 && !user.warned_at) {
           const message = `【警告】GitHubのアクティビティが低下しています。\nあと **${remainingDays}日** 以内にコミットなどの活動がない場合、Discordの連携ロールが自動解除されます。\n（対象アカウント: ${user.github_username}）`;
           
@@ -159,7 +185,7 @@ export default {
           }
         }
       } catch (err) {
-        console.error(`[Cron Error] Discord ID: ${user.discord_id} - ${err.message}`);
+        console.error(`[Cron Error] Discord ID: ${user.discord_id} -${err.message}`);
       }
     }
   }
@@ -235,7 +261,6 @@ async function getGitHubLastActiveDateGraphQL(username, accessToken) {
       const days = weeks[i].contributionDays;
       for (let j = days.length - 1; j >= 0; j--) {
         if (days[j].contributionCount > 0) {
-          // 当日の終わりの時間（23:59:59）としてパースさせることで日時の誤差を防止
           lastActiveDate = `${days[j].date}T23:59:59.000Z`;
           break;
         }
@@ -250,13 +275,13 @@ async function getGitHubLastActiveDateGraphQL(username, accessToken) {
   }
 }
 
-async function getDiscordToken(code, env) {
+async function getDiscordTokenWithUri(code, env, redirectUri) {
   const params = new URLSearchParams();
   params.append("client_id", env.DISCORD_CLIENT_ID);
   params.append("client_secret", env.DISCORD_CLIENT_SECRET);
   params.append("grant_type", "authorization_code");
   params.append("code", code);
-  params.append("redirect_uri", env.DISCORD_REDIRECT_URI);
+  params.append("redirect_uri", redirectUri);
 
   const res = await fetch("https://discord.com/api/v10/oauth2/token", {
     method: "POST",
@@ -295,6 +320,19 @@ async function updateDiscordRoleConnection(accessToken, clientId, githubUsername
     }),
   });
   if (!res.ok) throw new Error("Linked Roleメタデータの更新に失敗しました");
+}
+
+// ★追加: Discord側の連携メタデータを実際に削除する関数
+async function deleteDiscordRoleConnection(accessToken, clientId) {
+  const res = await fetch(`https://discord.com/api/v10/users/@me/applications/${clientId}/role-connection`, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+  if (!res.ok && res.status !== 404) {
+    throw new Error("Discord側の連携データ削除に失敗しました");
+  }
 }
 
 async function sendDirectMessage(botToken, recipientId, messageContent) {
