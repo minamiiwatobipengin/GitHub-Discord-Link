@@ -2,6 +2,22 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
+    // 0-0. [新規追加] メタデータ定義の直接登録エンドポイント（認証不要・入力不要）
+    if (url.pathname === "/register-metadata") {
+      try {
+        await registerRoleConnectionMetadata(env);
+        return new Response("Discord Linked Role メタデータ定義の更新に成功しました。", {
+          status: 200,
+          headers: { "Content-Type": "text/plain; charset=utf-8" }
+        });
+      } catch (err) {
+        return new Response(`メタデータ定義の更新に失敗しました: ${err.message}`, {
+          status: 500,
+          headers: { "Content-Type": "text/plain; charset=utf-8" }
+        });
+      }
+    }
+
     // 0-1. 利用規約ページ (/terms)
     if (url.pathname === "/terms") {
       return new Response(getTermsHtml(), {
@@ -53,7 +69,7 @@ export default {
       });
     }
 
-    // Discordロールメタデータ定義の自動登録
+    // バックグラウンドでのメタデータ自動同期
     ctx.waitUntil(registerRoleConnectionMetadata(env));
 
     // 1. GitHub OAuth2 認証開始
@@ -62,14 +78,14 @@ export default {
       return Response.redirect(githubAuthUrl, 302);
     }
 
-    // 連携解除の処理開始（Discord認証へ飛ばしてユーザー識別を行う）
+    // 連携解除の処理開始
     if (url.pathname === "/unlink") {
       const unlinkRedirectUri = `${url.origin}/unlink-callback`;
       const discordAuthUrl = `https://discord.com/oauth2/authorize?client_id=${env.DISCORD_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(unlinkRedirectUri)}&scope=role_connections.write%20identify`;
       return Response.redirect(discordAuthUrl, 302);
     }
 
-    // 連携解除のコールバック処理（API削除＋DB削除を実行）
+    // 連携解除のコールバック処理
     if (url.pathname === "/unlink-callback") {
       const code = url.searchParams.get("code");
       if (!code) return new Response("認証コードがありません", { status: 400 });
@@ -79,10 +95,7 @@ export default {
         const tokenData = await getDiscordTokenWithUri(code, env, unlinkRedirectUri);
         const discordUser = await getDiscordUser(tokenData.access_token);
 
-        // 1. Discord 側の連携ロールメタデータを削除 (DELETE)
         await deleteDiscordRoleConnection(tokenData.access_token, env.DISCORD_CLIENT_ID);
-
-        // 2. D1 データベースから該当ユーザーを削除
         await env.DB.prepare("DELETE FROM users WHERE discord_id = ?").bind(discordUser.id).run();
 
         return new Response(`
@@ -383,27 +396,28 @@ function getTermsHtml() {
 /* --- ヘルパー関数群 --- */
 
 async function registerRoleConnectionMetadata(env) {
-  try {
-    const url = `https://discord.com/api/v10/applications/${env.DISCORD_CLIENT_ID}/role-connections/metadata`;
-    const body = [
-      {
-        key: "active_within_30days",
-        name: "30日以内のGitHubアクティビティ",
-        description: "直近30日以内にGitHubで活動があるか",
-        type: 7
-      }
-    ];
+  const url = `https://discord.com/api/v10/applications/${env.DISCORD_CLIENT_ID}/role-connections/metadata`;
+  const body = [
+    {
+      key: "active_within_30days",
+      name: "30日以内のGitHubアクティビティ",
+      description: "直近30日以内にGitHubで活動があるか",
+      type: 7
+    }
+  ];
 
-    await fetch(url, {
-      method: "PUT",
-      headers: {
-        Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-  } catch (e) {
-    console.error("Failed to register role connection metadata:", e);
+  const res = await fetch(url, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Discord API Error (${res.status}): ${errorText}`);
   }
 }
 
@@ -450,7 +464,6 @@ async function getGitHubLastActiveDateGraphQL(username, accessToken) {
       const days = weeks[i].contributionDays;
       for (let j = days.length - 1; j >= 0; j--) {
         if (days[j].contributionCount > 0) {
-          // 当日の 00:00:00.000Z とすることで未来時刻（未来日判定での不合格）事故を確実に防ぐ
           lastActiveDate = `${days[j].date}T00:00:00.000Z`;
           break;
         }
