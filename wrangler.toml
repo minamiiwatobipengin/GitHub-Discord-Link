@@ -12,5 +12,5 @@ TARGET_CHANNEL_ID = "1483798584502779974"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "linked-role-db"
+database_name = "test"
 database_id = "bc9a890f-db0e-4078-acff-b095447d66d8" # D1のIDは公開されても安全
