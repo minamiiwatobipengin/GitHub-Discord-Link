@@ -11,6 +11,7 @@ TARGET_GUILD_ID = "1483797999519010957"
 TARGET_CHANNEL_ID = "1483798584502779974"
 GITHUB_CLIENT_ID = "Ov23lih47fNb6rXghUyj"
 DISCORD_CLIENT_ID = "1545721397278408725"
+DISCORD_REDIRECT_URI = "https://github-discord-link.iwatobi.workers.dev/callback"
 
 [[d1_databases]]
 binding = "DB"
