@@ -2,19 +2,61 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // 1. DiscordからのOAuth2認証開始エンドポイント
+    // 1. GitHub OAuth2 認証開始
     if (url.pathname === "/linked-role") {
-      const discordAuthUrl = `https://discord.com/oauth2/authorize?client_id=${env.DISCORD_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(env.DISCORD_REDIRECT_URI)}&scope=role_connections.write%20identify`;
-      return Response.redirect(discordAuthUrl, 302);
+      const githubAuthUrl = `https://github.com/login/oauth/authorize?client_id=${env.GITHUB_CLIENT_ID}&scope=read:user`;
+      return Response.redirect(githubAuthUrl, 302);
     }
 
-    // 2. OAuth2 コールバック処理
+    // 2. GitHub コールバック処理 ➔ ユーザー名を取得して Discord 認証へ
+    if (url.pathname === "/github-callback") {
+      const code = url.searchParams.get("code");
+      if (!code) return new Response("GitHub Codeが取得できませんでした", { status: 400 });
+
+      try {
+        // GitHubアクセストークン取得
+        const tokenRes = await fetch("https://github.com/login/oauth/access_token", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "CloudflareWorkers-DiscordBot"
+          },
+          body: JSON.stringify({
+            client_id: env.GITHUB_CLIENT_ID,
+            client_secret: env.GITHUB_CLIENT_SECRET,
+            code: code,
+          }),
+        });
+        const tokenData = await tokenRes.json();
+        if (!tokenData.access_token) throw new Error("GitHubトークン取得失敗");
+
+        // GitHubユーザー情報取得
+        const userRes = await fetch("https://api.github.com/user", {
+          headers: {
+            "Authorization": `Bearer ${tokenData.access_token}`,
+            "User-Agent": "CloudflareWorkers-DiscordBot"
+          }
+        });
+        const githubUser = await userRes.json();
+        const githubUsername = githubUser.login;
+
+        // GitHubユーザー名を state に保持して Discord 認証へリダイレクト
+        const discordAuthUrl = `https://discord.com/oauth2/authorize?client_id=${env.DISCORD_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(env.DISCORD_REDIRECT_URI)}&scope=role_connections.write%20identify&state=${encodeURIComponent(githubUsername)}`;
+        return Response.redirect(discordAuthUrl, 302);
+
+      } catch (err) {
+        return new Response(`GitHub連携エラー: ${err.message}`, { status: 500 });
+      }
+    }
+
+    // 3. Discord OAuth2 コールバック処理
     if (url.pathname === "/callback") {
       const code = url.searchParams.get("code");
-      const githubUsername = url.searchParams.get("github");
+      const githubUsername = url.searchParams.get("state"); // state から取得
 
       if (!code || !githubUsername) {
-        return new Response("パラメータが不足しています (?github=YOUR_GITHUB_NAME が必要です)", { status: 400 });
+        return new Response("パラメータが不足しています", { status: 400 });
       }
 
       try {
@@ -27,7 +69,7 @@ export default {
         const daysInactive = getDaysDifference(new Date(lastActiveAt), new Date());
         const isActive = daysInactive < 30;
 
-        // Cloudflare D1 (CfD1) にユーザー情報・トークン・状態を保存
+        // Cloudflare D1 に保存
         await env.DB.prepare(`
           INSERT INTO users (discord_id, access_token, refresh_token, github_username, last_active_at, warned_at)
           VALUES (?, ?, ?, ?, ?, NULL)
@@ -39,7 +81,7 @@ export default {
             warned_at = NULL
         `).bind(discordUser.id, tokenData.access_token, tokenData.refresh_token, githubUsername, lastActiveAt).run();
 
-        // Discord Role Connection (連携メタデータ) 更新
+        // Discord Role Connection 更新
         await updateDiscordRoleConnection(tokenData.access_token, env.DISCORD_CLIENT_ID, githubUsername, isActive);
 
         // 指定のDiscordチャンネルへリダイレクト
@@ -54,7 +96,7 @@ export default {
     return new Response("Not Found", { status: 404 });
   },
 
-  // 3. 毎日0時の定時バッチ処理 (警告DM ＆ 自動ロール剥奪)
+  // 4. 定時バッチ処理 (変更なし)
   async scheduled(event, env, ctx) {
     const { results: users } = await env.DB.prepare("SELECT * FROM users").all();
 
@@ -64,7 +106,6 @@ export default {
         const daysInactive = getDaysDifference(new Date(lastActiveAt), new Date());
         const remainingDays = 30 - daysInactive;
 
-        // パターンA: 30日以上非アクティブ ➔ ロール剥奪 ＆ 解除DM送信
         if (remainingDays <= 0) {
           await updateDiscordRoleConnection(user.access_token, env.DISCORD_CLIENT_ID, user.github_username, false);
           await sendDirectMessage(
@@ -75,13 +116,11 @@ export default {
           continue;
         }
 
-        // パターンB: 残り5日以下 ＆ 未警告 ➔ 警告DM送信
         if (remainingDays <= 5 && !user.warned_at) {
           const message = `【警告】GitHubのアクティビティが低下しています。\nあと **${remainingDays}日** 以内にコミットなどの活動がない場合、Discordの連携ロールが自動解除されます。\n（対象アカウント: ${user.github_username}）`;
           
           const sent = await sendDirectMessage(env.DISCORD_BOT_TOKEN, user.discord_id, message);
           if (sent) {
-            // 連日送信を避けるため警告送信日時をD1へ書き込み
             await env.DB.prepare("UPDATE users SET warned_at = ? WHERE discord_id = ?")
               .bind(new Date().toISOString(), user.discord_id).run();
           }
@@ -95,27 +134,30 @@ export default {
 
 /* --- API通信・処理用ヘルパー関数群 --- */
 
-// Discord OAuth2 トークン取得
+// 「フォームボディ無効」エラーを防ぐために修正した関数
 async function getDiscordToken(code, env) {
-  const body = new URLSearchParams({
-    client_id: env.DISCORD_CLIENT_ID,
-    client_secret: env.DISCORD_CLIENT_SECRET,
-    grant_type: "authorization_code",
-    code: code,
-    redirect_uri: env.DISCORD_REDIRECT_URI,
-  });
+  const params = new URLSearchParams();
+  params.append("client_id", env.DISCORD_CLIENT_ID);
+  params.append("client_secret", env.DISCORD_CLIENT_SECRET);
+  params.append("grant_type", "authorization_code");
+  params.append("code", code);
+  params.append("redirect_uri", env.DISCORD_REDIRECT_URI);
 
   const res = await fetch("https://discord.com/api/v10/oauth2/token", {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
+    headers: { 
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: params.toString(),
   });
 
-  if (!res.ok) throw new Error("Discordトークンの取得に失敗しました");
+  if (!res.ok) {
+    const errorDetail = await res.text();
+    throw new Error(`Discordトークンの取得に失敗しました: ${errorDetail}`);
+  }
   return await res.json();
 }
 
-// ユーザー情報取得
 async function getDiscordUser(accessToken) {
   const res = await fetch("https://discord.com/api/v10/users/@me", {
     headers: { Authorization: `Bearer ${accessToken}` }
@@ -124,7 +166,6 @@ async function getDiscordUser(accessToken) {
   return await res.json();
 }
 
-// GitHub APIで最新アクティビティ日時を取得
 async function getGitHubLastActiveDate(username) {
   const res = await fetch(`https://api.github.com/users/${username}/events`, {
     headers: { "User-Agent": "CloudflareWorkers-DiscordBot" }
@@ -134,12 +175,10 @@ async function getGitHubLastActiveDate(username) {
   return events.length > 0 ? events[0].created_at : new Date(0).toISOString();
 }
 
-// 日数差の判定
 function getDaysDifference(d1, d2) {
   return Math.floor((d2 - d1) / (1000 * 60 * 60 * 24));
 }
 
-// Discord Role Connection (連携メタデータ) の更新
 async function updateDiscordRoleConnection(accessToken, clientId, githubUsername, isActive) {
   const res = await fetch(`https://discord.com/api/v10/users/@me/applications/${clientId}/role-connection`, {
     method: "PUT",
@@ -158,10 +197,8 @@ async function updateDiscordRoleConnection(accessToken, clientId, githubUsername
   if (!res.ok) throw new Error("Linked Roleメタデータの更新に失敗しました");
 }
 
-// Botトークンを用いたDiscord DM送信
 async function sendDirectMessage(botToken, recipientId, messageContent) {
   try {
-    // DMチャンネルの作成
     const channelRes = await fetch("https://discord.com/api/v10/users/@me/channels", {
       method: "POST",
       headers: {
@@ -173,7 +210,6 @@ async function sendDirectMessage(botToken, recipientId, messageContent) {
     if (!channelRes.ok) return false;
     const channel = await channelRes.json();
 
-    // メッセージの送信
     const msgRes = await fetch(`https://discord.com/api/v10/channels/${channel.id}/messages`, {
       method: "POST",
       headers: {
