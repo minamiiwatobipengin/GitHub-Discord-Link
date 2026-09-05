@@ -1,0 +1,18 @@
+name = "github-linked-role"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+# 毎日午前0時に定時巡回（Cron Trigger）
+[triggers]
+crons = ["0 0 * * *"]
+
+# 環境変数（サーバーIDと転送先チャンネルID）
+[vars]
+TARGET_GUILD_ID = "YOUR_DISCORD_GUILD_ID"       # DiscordサーバーID
+TARGET_CHANNEL_ID = "YOUR_DISCORD_CHANNEL_ID"   # 認証完了後に開くチャンネルID
+
+# Cloudflare D1 データベースの設定
+[[d1_databases]]
+binding = "DB"
+database_name = "linked-role-db"
+database_id = "YOUR_D1_DATABASE_ID" # npx wrangler d1 create で発行されたIDを入力
