@@ -310,7 +310,7 @@ function getPrivacyHtml() {
         <p>当サービスは、必要に応じて本ポリシーを変更することがあります。変更後のポリシーは、当サービス上に掲載した時点から効力を生じるものとします。</p>
 
         <h3>8. お問い合わせ窓口</h3>
-        <p>サポートサーバー:https://discord.gg/DYb3cWNe4</p>
+        <p>サポートサーバー:https://discord.gg/XdGrtFSbQ6</p>
         <p><strong>事業者／運営者名:</strong> ミナミイワトビペンギン</p>
         <p>（制定日：2026年9月5日）</p>
       </body>
