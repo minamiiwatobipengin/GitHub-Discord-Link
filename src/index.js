@@ -450,8 +450,8 @@ async function getGitHubLastActiveDateGraphQL(username, accessToken) {
       const days = weeks[i].contributionDays;
       for (let j = days.length - 1; j >= 0; j--) {
         if (days[j].contributionCount > 0) {
-          // 日本時間 (JST) の 23:59:59 として指定（+09:00 を付与してUTC未来判定を防ぐ）
-          lastActiveDate = `${days[j].date}T23:59:59.000+09:00`;
+          // 当日の 00:00:00.000Z とすることで未来時刻（未来日判定での不合格）事故を確実に防ぐ
+          lastActiveDate = `${days[j].date}T00:00:00.000Z`;
           break;
         }
       }
