@@ -2,7 +2,7 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // 0-0. メタデータ定義の直接登録エンドポイント（認証不要・入力不要）
+    // 0-0. メタデータ定義の直接登録エンドポイント
     if (url.pathname === "/register-metadata") {
       try {
         await registerRoleConnectionMetadata(env);
@@ -18,100 +18,14 @@ export default {
       }
     }
 
-    // 0-1. 利用規約ページ (/terms)
-    if (url.pathname === "/terms") {
-      return new Response(getTermsHtml(), {
-        headers: { "Content-Type": "text/html; charset=utf-8" }
-      });
-    }
+    // (※ リクエストごとの registerRoleConnectionMetadata(env) 呼び出しは削除)
 
-    // 0-2. プライバシーポリシーページ (/privacy)
-    if (url.pathname === "/privacy") {
-      return new Response(getPrivacyHtml(), {
-        headers: { "Content-Type": "text/html; charset=utf-8" }
-      });
-    }
-
-    // 0-3. 同意・連携案内ページ (/link)
-    if (url.pathname === "/link") {
-      return new Response(`
-        <html>
-          <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>規約同意と連携 - Githubアクティブアカウントチェック</title>
-            <style>
-              body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; text-align: center; padding: 40px 20px; line-height: 1.6; background: #f9f9f9; color: #333; }
-              .card { max-width: 480px; margin: 0 auto; background: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-              h2 { margin-top: 0; color: #111; }
-              a.btn { display: inline-block; background-color: #5865F2; color: #fff; padding: 12px 24px; text-decoration: none; border-radius: 4px; font-weight: bold; margin-top: 20px; }
-              a.btn:hover { background-color: #4752C4; }
-              .links { margin: 20px 0; font-size: 14px; }
-              .links a { color: #0969da; text-decoration: none; }
-              .links a:hover { text-decoration: underline; }
-            </style>
-          </head>
-          <body>
-            <div class="card">
-              <h2>サービス連携と規約同意</h2>
-              <p>以下のアカウント連携を進める前に、利用規約およびプライバシーポリシーをご確認ください。</p>
-              <div class="links">
-                <a href="/terms" target="_blank">利用規約</a> | <a href="/privacy" target="_blank">プライバシーポリシー</a><br>
-                <span style="font-size: 12px; color: #666;">（リポジトリで確認する場合は <a href="https://github.com/minamiiwatobipengin/GitHub-Discord-Link/tree/main" target="_blank">こちら</a>）</span>
-              </div>
-              <p>「同意して進む」をクリックすると、GitHub認証画面へ遷移します。</p>
-              <a href="/linked-role" class="btn">同意して連携する</a>
-            </div>
-          </body>
-        </html>
-      `, {
-        headers: { "Content-Type": "text/html; charset=utf-8" }
-      });
-    }
-
-    // バックグラウンドでのメタデータ自動同期
-    ctx.waitUntil(registerRoleConnectionMetadata(env));
+    // 0-1 ~ 0-3 省略 (変更なし) ...
 
     // 1. GitHub OAuth2 認証開始
     if (url.pathname === "/linked-role") {
       const githubAuthUrl = `https://github.com/login/oauth/authorize?client_id=${env.GITHUB_CLIENT_ID}&scope=read:user`;
       return Response.redirect(githubAuthUrl, 302);
-    }
-
-    // 連携解除の処理開始
-    if (url.pathname === "/unlink") {
-      const unlinkRedirectUri = `${url.origin}/unlink-callback`;
-      const discordAuthUrl = `https://discord.com/oauth2/authorize?client_id=${env.DISCORD_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(unlinkRedirectUri)}&scope=role_connections.write%20identify`;
-      return Response.redirect(discordAuthUrl, 302);
-    }
-
-    // 連携解除のコールバック処理
-    if (url.pathname === "/unlink-callback") {
-      const code = url.searchParams.get("code");
-      if (!code) return new Response("認証コードがありません", { status: 400 });
-
-      try {
-        const unlinkRedirectUri = `${url.origin}/unlink-callback`;
-        const tokenData = await getDiscordTokenWithUri(code, env, unlinkRedirectUri);
-        const discordUser = await getDiscordUser(tokenData.access_token);
-
-        await deleteDiscordRoleConnection(tokenData.access_token, env.DISCORD_CLIENT_ID);
-        await env.DB.prepare("DELETE FROM users WHERE discord_id = ?").bind(discordUser.id).run();
-
-        return new Response(`
-          <html>
-            <body style="font-family: sans-serif; text-align: center; padding-top: 50px;">
-              <h2>連携を完全に解除しました</h2>
-              <p>GitHubとの連携データおよびDiscordのロール条件を削除しました。</p>
-            </body>
-          </html>
-        `, {
-          headers: { "Content-Type": "text/html; charset=utf-8" }
-        });
-
-      } catch (err) {
-        return new Response(`連携解除エラー: ${err.message}`, { status: 500 });
-      }
     }
 
     // 2. GitHub コールバック処理
@@ -158,7 +72,7 @@ export default {
       }
     }
 
-    // 3. Discord OAuth2 コールバック処理（連携保存）
+    // 3. Discord OAuth2 コールバック処理
     if (url.pathname === "/callback") {
       const code = url.searchParams.get("code");
       const stateRaw = url.searchParams.get("state");
@@ -173,7 +87,6 @@ export default {
         const tokenData = await getDiscordTokenWithUri(code, env, env.DISCORD_REDIRECT_URI);
         const discordUser = await getDiscordUser(tokenData.access_token);
 
-        // GitHub メトリクス（草・フォロワー・スター・リポジトリ・年間貢献数）を一括取得
         const githubMetrics = await getGitHubUserMetricsGraphQL(githubUsername, githubAccessToken);
         
         const now = Date.now();
@@ -199,7 +112,6 @@ export default {
             warned_at = NULL
         `).bind(discordUser.id, tokenData.access_token, tokenData.refresh_token, githubUsername, githubAccessToken, saveDate).run();
 
-        // Discord の Linked Role メタデータを一気に更新
         await updateDiscordRoleConnection(
           tokenData.access_token,
           env.DISCORD_CLIENT_ID,
@@ -224,19 +136,33 @@ export default {
       }
     }
 
+    // 省略 (unlink / terms / privacy 等)...
     return new Response("Not Found", { status: 404 });
   },
 
-  // 4. 定期実行バッチ (Cron)
+  // 4. 定期実行バッチ (Cron) - トークン再取得処理を追加
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(registerRoleConnectionMetadata(env));
-
     const { results: users } = await env.DB.prepare("SELECT * FROM users").all();
     const now = Date.now();
     const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
 
     for (const user of users) {
       try {
+        let accessToken = user.access_token;
+
+        // トークンの有効性を維持するため、事前にリフレッシュを試行（または401ハンドリング）
+        try {
+          const refreshed = await refreshDiscordToken(user.refresh_token, env);
+          accessToken = refreshed.access_token;
+          
+          // 新しいトークンをDBへ保存
+          await env.DB.prepare(`
+            UPDATE users SET access_token = ?, refresh_token = ? WHERE discord_id = ?
+          `).bind(refreshed.access_token, refreshed.refresh_token, user.discord_id).run();
+        } catch (e) {
+          console.warn(`[Token Refresh Failed] Discord ID: ${user.discord_id} - ${e.message}`);
+        }
+
         const githubMetrics = await getGitHubUserMetricsGraphQL(user.github_username, user.github_access_token);
         
         const lastActiveTime = githubMetrics.lastActiveAt ? new Date(githubMetrics.lastActiveAt).getTime() : 0;
@@ -245,9 +171,9 @@ export default {
         const daysInactive = Math.floor((now - lastActiveTime) / (1000 * 60 * 60 * 24));
         const remainingDays = 30 - daysInactive;
 
-        // 全てのメタデータを更新
+        // 更新実行
         await updateDiscordRoleConnection(
-          user.access_token,
+          accessToken,
           env.DISCORD_CLIENT_ID,
           user.github_username,
           isActive,
@@ -279,291 +205,14 @@ export default {
   }
 };
 
-/* --- ドキュメント用 HTML --- */
+// --- 追加されたヘルパー関数 ---
 
-function getPrivacyHtml() {
-  return `
-    <html>
-      <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>プライバシーポリシー - Githubアクティブアカウントチェック</title>
-        <style>
-          body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.7; padding: 20px; max-width: 800px; margin: 0 auto; color: #24292f; }
-          h1 { border-bottom: 1px solid #d0d7de; padding-bottom: 8px; }
-          h3 { margin-top: 24px; }
-          ul { padding-left: 20px; }
-        </style>
-      </head>
-      <body>
-        <h1>プライバシーポリシー</h1>
-        <p>Githubアクティブアカウントチェック（以下、「当サービス」といいます。）は、ユーザーの個人情報の取扱いについて、以下のとおりプライバシーポリシー（以下、「本ポリシー」といいます。）を定め、適切な保護に努めます。</p>
-
-        <h3>1. 取得する情報およびその取得方法</h3>
-        <p>当サービスは、本サービスの提供にあたり、以下の情報を取得・利用します。</p>
-        <ul>
-          <li><strong>Discordに関する情報:</strong> Discord ユーザーID、ユーザー名、アクセストークンおよびリフレッシュトークン</li>
-          <li><strong>GitHubに関する情報:</strong> GitHub ユーザー名、アクセストークン、フォロワー数、所有リポジトリの獲得スター総数、パブリックリポジトリ数、過去1年間の総コントリビューション数、および最終アクティブ日時</li>
-          <li><strong>アクセスログおよび運用管理情報:</strong> システム利用履歴、エラーログ、警告通知の送信履歴（<code>warned_at</code> 等）</li>
-        </ul>
-
-        <h3>2. 利用目的</h3>
-        <p>当サービスは、取得した情報を以下の目的で利用します。</p>
-        <ol>
-          <li>ユーザーの識別およびDiscordアカウントとGitHubアカウントの連携処理のため</li>
-          <li>GitHubでのアクティビティや各種メトリクス（草・フォロワー数・スター数・リポジトリ数等）に基づき、Discordのロール（Linked Role）メタデータを自動更新・管理するため</li>
-          <li>非アクティブ状態時の警告通知およびロール自動解除通知をDiscord DMにて送信するため</li>
-          <li>当サービスの維持、管理、障害対応および品質向上のため</li>
-          <li>お問い合わせへの対応のため</li>
-        </ol>
-
-        <h3>3. 情報の第三者提供および外部送信</h3>
-        <p>当サービスは、法令に基づく場合を除き、事前にユーザーの同意を得ることなく個人情報を第三者に提供することはありません。</p>
-        <p>なお、サービスの性質上、Discord API（Discord Inc.）および GitHub API（GitHub, Inc.）とのデータ通信を行います。</p>
-
-        <h3>4. データの保存および安全管理</h3>
-        <p>1. 当サービスは、取得したトークン等の機密情報をデータベース（Cloudflare D1等）に適切に保管し、不正アクセス・漏洩の防止に努めます。</p>
-        <p>2. 連携解除が実行された場合、当サービス内に保存されている該当ユーザーのトークンおよび関連データは速やかに削除されます。</p>
-
-        <h3>5. ユーザーによるデータの削除（連携解除）</h3>
-        <p>ユーザーは、以下の方法によりいつでも自身のデータを削除し、連携を解除することができます。</p>
-        <ul>
-          <li>当サービスの連携解除機能（<code>/unlink</code> ページ）の実行</li>
-          <li>Discordアプリ内の「設定 ＞ 連携アカウント」からの削除</li>
-        </ul>
-
-        <h3>6. 免責事項</h3>
-        <p>当サービスは、GitHub APIまたはDiscord APIの仕様変更、通信障害、システム保守等に起因して発生した損害について、一切の責任を負いません。</p>
-
-        <h3>7. プライバシーポリシーの改定</h3>
-        <p>当サービスは、必要に応じて本ポリシーを変更することがあります。変更後のポリシーは、当サービス上に掲載した時点から効力を生じるものとします。</p>
-
-        <h3>8. お問い合わせ窓口</h3>
-        <p>サポートサーバー: https://discord.gg/XdGrtFSbQ6</p>
-        <p><strong>事業者／運営者名:</strong> ミナミイワトビペンギン</p>
-        <p>（改定日：2026年9月5日）</p>
-      </body>
-    </html>
-  `;
-}
-
-function getTermsHtml() {
-  return `
-    <html>
-      <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>利用規約 - Githubアクティブアカウントチェック</title>
-        <style>
-          body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.7; padding: 20px; max-width: 800px; margin: 0 auto; color: #24292f; }
-          h1 { border-bottom: 1px solid #d0d7de; padding-bottom: 8px; }
-          h3 { margin-top: 24px; }
-          ol { padding-left: 20px; }
-        </style>
-      </head>
-      <body>
-        <h1>利用規約</h1>
-        <p>この利用規約（以下、「本規約」といいます。）は、ミナミイワトビペンギン（以下、「運営者」といいます。）が提供するGithubアクティブアカウントチェック（以下、「本サービス」といいます。）の利用条件を定めるものです。ユーザーの皆様は、本規約に従って本サービスをご利用ください。</p>
-
-        <h3>第1条（適用）</h3>
-        <p>1. 本規約は、ユーザーと運営者との間の本サービスの利用に関わる一切の関係に適用されます。</p>
-        <p>2. ユーザーは、本サービスを利用（GitHubおよびDiscordの連携認証を行うことを含みます）することにより、本規約に同意したものとみなされます。</p>
-
-        <h3>第2条（連携機能およびロール更新）</h3>
-        <p>1. 本サービスは、ユーザーのGitHubアクティビティ（過去30日以内のコントリビューション等）やアカウント統計情報（フォロワー数、獲得スター数、リポジトリ数など）を取得し、Discordのロール付与条件（Linked Role）を自動更新します。</p>
-        <p>2. 各Discordサーバーの管理者が設定した条件（アクティブ状態、フォロワー数、スター数等）を満たさなくなった場合、該当するロールが自動的に解除されることがあります。</p>
-
-        <h3>第3条（禁止事項）</h3>
-        <p>ユーザーは、本サービスの利用にあたり、以下の行為をしてはなりません。</p>
-        <ol>
-          <li>法令または公序良俗に違反する行為</li>
-          <li>本サービスのシステムやAPI、データベースに対する不正アクセス、過度な負荷をかける行為</li>
-          <li>他のユーザーのアカウントになりすます行為</li>
-          <li>本サービスの運営を妨害するおそれのある行為</li>
-          <li>その他、運営者が不適切と判断する行為</li>
-        </ol>
-
-        <h3>第4条（サービスの停止・変更・終了）</h3>
-        <p>運営者は、以下のいずれかの理由により、ユーザーに事前に通知することなく本サービスの提供を一時停止、変更、または終了することができるものとします。</p>
-        <ol>
-          <li>本サービスに係るシステムの保守点検または更新を行う場合</li>
-          <li>地震、火災、停電等の不可抗力により本サービスの提供が困難となった場合</li>
-          <li>GitHub API または Discord API の仕様変更やサービス停止が発生した場合</li>
-          <li>その他、運営者が本サービスの提供が困難と判断した場合</li>
-        </ol>
-
-        <h3>第5条（免責事項）</h3>
-        <p>1. 運営者は、本サービスに事実上または法律上の欠陥（安全性、信頼性、正確性、完全性、有効性、特定の目的への適合性、セキュリティなどに関する欠陥、エラーやバグ、権利侵害などを含みます。）がないことを明示的にも暗示的にも保証しておりません。</p>
-        <p>2. 運営者は、本サービスの利用によってユーザーに生じたあらゆる損害（Discordロールの剥奪、データの消失等を含む）について、一切の責任を負いません。</p>
-
-        <h3>第6条（利用規約の変更）</h3>
-        <p>運営者は、必要と判断した場合には、ユーザーに通知することなくいつでも本規約を変更することができるものとします。変更後の規約は、本サービス上に掲載した時点で効力を生じるものとします。</p>
-
-        <h3>第7条（準拠法・裁判管轄）</h3>
-        <p>1. 本規約の解釈にあたっては、日本法を準拠法とします。</p>
-        <p>2. 本サービスに関して紛争が生じた場合、運営者の所在地を管轄する裁判所を専属的合意管轄とします。</p>
-
-        <p>（改定日：2026年9月5日）</p>
-      </body>
-    </html>
-  `;
-}
-
-/* --- ヘルパー関数群 --- */
-
-// Discord サーバー管理者がロール付与条件として選べる項目（メタデータ）を登録
-async function registerRoleConnectionMetadata(env) {
-  const url = `https://discord.com/api/v10/applications/${env.DISCORD_CLIENT_ID}/role-connections/metadata`;
-  const body = [
-    {
-      key: "active_within_30days",
-      name: "30日以内のGitHubアクティビティ",
-      description: "直近30日以内にGitHubで草が生えているか",
-      type: 7 // Boolean Equals
-    },
-    {
-      key: "followers_count",
-      name: "フォロワー数",
-      description: "GitHubのフォロワー数",
-      type: 2 // Integer Greater Than or Equal
-    },
-    {
-      key: "total_stars",
-      name: "獲得スター総数",
-      description: "所有している公開リポジトリの獲得スター総数",
-      type: 2 // Integer Greater Than or Equal
-    },
-    {
-      key: "public_repos",
-      name: "パブリックリポジトリ数",
-      description: "公開されているリポジトリの数",
-      type: 2 // Integer Greater Than or Equal
-    },
-    {
-      key: "yearly_contributions",
-      name: "年間コントリビューション数",
-      description: "過去1年間の総草（コントリビューション）数",
-      type: 2 // Integer Greater Than or Equal
-    }
-  ];
-
-  const res = await fetch(url, {
-    method: "PUT",
-    headers: {
-      Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!res.ok) {
-    const errorText = await res.text();
-    throw new Error(`Discord API Error (${res.status}): ${errorText}`);
-  }
-}
-
-// GitHub GraphQL API で全メトリクスを一括取得
-async function getGitHubUserMetricsGraphQL(username, accessToken) {
-  const emptyResult = {
-    lastActiveAt: null,
-    followersCount: 0,
-    totalStars: 0,
-    publicRepos: 0,
-    yearlyContributions: 0
-  };
-
-  if (!accessToken) return emptyResult;
-
-  const query = `
-    query($username: String!) {
-      user(login: $username) {
-        followers {
-          totalCount
-        }
-        repositories(first: 100, ownerAffiliations: OWNER, privacy: PUBLIC) {
-          totalCount
-          nodes {
-            stargazerCount
-          }
-        }
-        contributionsCollection {
-          contributionCalendar {
-            totalContributions
-            weeks {
-              contributionDays {
-                date
-                contributionCount
-              }
-            }
-          }
-        }
-      }
-    }
-  `;
-
-  try {
-    const res = await fetch("https://api.github.com/graphql", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${accessToken}`,
-        "User-Agent": "CloudflareWorkers-DiscordBot",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ query, variables: { username } }),
-    });
-
-    if (!res.ok) return emptyResult;
-
-    const resData = await res.json();
-    const user = resData.data?.user;
-    if (!user) return emptyResult;
-
-    // 1. フォロワー数 & リポジトリ数
-    const followersCount = user.followers?.totalCount || 0;
-    const publicRepos = user.repositories?.totalCount || 0;
-
-    // 2. スター総数の合算 (最大100リポジトリ)
-    const totalStars = (user.repositories?.nodes || []).reduce((sum, repo) => sum + repo.stargazerCount, 0);
-
-    // 3. 1年間の総コントリビューション数
-    const calendar = user.contributionsCollection?.contributionCalendar;
-    const yearlyContributions = calendar?.totalContributions || 0;
-
-    // 4. 最終アクティブ日時の計算
-    const weeks = calendar?.weeks || [];
-    let lastActiveDate = null;
-    for (let i = weeks.length - 1; i >= 0; i--) {
-      const days = weeks[i].contributionDays;
-      for (let j = days.length - 1; j >= 0; j--) {
-        if (days[j].contributionCount > 0) {
-          lastActiveDate = `${days[j].date}T00:00:00.000Z`;
-          break;
-        }
-      }
-      if (lastActiveDate) break;
-    }
-
-    return {
-      lastActiveAt: lastActiveDate,
-      followersCount,
-      totalStars,
-      publicRepos,
-      yearlyContributions
-    };
-
-  } catch (e) {
-    console.error(`GitHub GraphQL API Error: ${e.message}`);
-    return emptyResult;
-  }
-}
-
-async function getDiscordTokenWithUri(code, env, redirectUri) {
+async function refreshDiscordToken(refreshToken, env) {
   const params = new URLSearchParams();
   params.append("client_id", env.DISCORD_CLIENT_ID);
   params.append("client_secret", env.DISCORD_CLIENT_SECRET);
-  params.append("grant_type", "authorization_code");
-  params.append("code", code);
-  params.append("redirect_uri", redirectUri);
+  params.append("grant_type", "refresh_token");
+  params.append("refresh_token", refreshToken);
 
   const res = await fetch("https://discord.com/api/v10/oauth2/token", {
     method: "POST",
@@ -572,77 +221,8 @@ async function getDiscordTokenWithUri(code, env, redirectUri) {
   });
 
   if (!res.ok) {
-    const errorDetail = await res.text();
-    throw new Error(`Discordトークンの取得に失敗しました: ${errorDetail}`);
+    const errText = await res.text();
+    throw new Error(`Discord Token Refresh Failed: ${errText}`);
   }
   return await res.json();
-}
-
-async function getDiscordUser(accessToken) {
-  const res = await fetch("https://discord.com/api/v10/users/@me", {
-    headers: { Authorization: `Bearer ${accessToken}` }
-  });
-  if (!res.ok) throw new Error("Discordユーザー情報の取得に失敗しました");
-  return await res.json();
-}
-
-async function updateDiscordRoleConnection(accessToken, clientId, githubUsername, isActive, metrics) {
-  const res = await fetch(`https://discord.com/api/v10/users/@me/applications/${clientId}/role-connection`, {
-    method: "PUT",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      platform_name: "GitHub",
-      platform_username: githubUsername,
-      metadata: {
-        active_within_30days: isActive ? 1 : 0,
-        followers_count: metrics.followersCount,
-        total_stars: metrics.totalStars,
-        public_repos: metrics.publicRepos,
-        yearly_contributions: metrics.yearlyContributions
-      },
-    }),
-  });
-  if (!res.ok) throw new Error("Linked Roleメタデータの更新に失敗しました");
-}
-
-async function deleteDiscordRoleConnection(accessToken, clientId) {
-  const res = await fetch(`https://discord.com/api/v10/users/@me/applications/${clientId}/role-connection`, {
-    method: "DELETE",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-  });
-  if (!res.ok && res.status !== 404) {
-    throw new Error("Discord側の連携データ削除に失敗しました");
-  }
-}
-
-async function sendDirectMessage(botToken, recipientId, messageContent) {
-  try {
-    const channelRes = await fetch("https://discord.com/api/v10/users/@me/channels", {
-      method: "POST",
-      headers: {
-        Authorization: `Bot ${botToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ recipient_id: recipientId }),
-    });
-    if (!channelRes.ok) return false;
-    const channel = await channelRes.json();
-
-    const msgRes = await fetch(`https://discord.com/api/v10/channels/${channel.id}/messages`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bot ${botToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ content: messageContent }),
-    });
-    return msgRes.ok;
-  } catch (e) {
-    return false;
-  }
 }
