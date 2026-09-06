@@ -2,7 +2,7 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // 0-0. 利用規約 ページ (直打ち/リンクで閲覧可能)
+    // 0-0. 利用規約 ページ
     if (url.pathname === "/terms") {
       return new Response(`
         <!DOCTYPE html>
@@ -40,7 +40,7 @@ export default {
       `, { headers: { "Content-Type": "text/html; charset=utf-8" } });
     }
 
-    // 0-0. プライバシーポリシー ページ (直打ち/リンクで閲覧可能)
+    // 0-0. プライバシーポリシー ページ
     if (url.pathname === "/privacy") {
       return new Response(`
         <!DOCTYPE html>
@@ -73,8 +73,9 @@ export default {
           <h2>3. データの保管と第三者提供</h2>
           <p>ユーザーデータは暗号化された安全なデータベース（Cloudflare D1）にて保管されます。法令に基づく場合を除き、第三者に提供・売却することはありません。</p>
 
-          <h2>4. データの削除（連携解除）</h2>
-          <p>ユーザーはいつでも <code>/unlink</code> エンドポイントにアクセスすることで、保存された個人データおよびDiscord連携情報を完全に削除できます。</p>
+          <h2>4. 個人データの削除請求および連携解除</h2>
+          <p>ユーザーはいつでも保存された自身のデータ削除（連携解除）を請求することができます。</p>
+          <p>自動連携解除（即時削除）を行う場合は <a href="/unlink">連携解除ページ（/unlink）</a> へアクセスするか、手動でのデータ削除請求手続きについては <a href="/data-deletion">データ削除請求ページ（/data-deletion）</a> をご確認ください。</p>
 
           <p><a href="/link" class="btn">同意画面へ戻る</a></p>
         </body>
@@ -82,7 +83,44 @@ export default {
       `, { headers: { "Content-Type": "text/html; charset=utf-8" } });
     }
 
-    // 0-0. 同意トップページ（規約・ポリシーへのリンクを直で表示）
+    // ★追加: データ削除請求（Data Deletion Request）ページ
+    if (url.pathname === "/data-deletion") {
+      return new Response(`
+        <!DOCTYPE html>
+        <html lang="ja">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>データ削除請求</title>
+          <style>
+            body { font-family: sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; line-height: 1.6; color: #333; }
+            h1 { border-bottom: 2px solid #5865F2; padding-bottom: 10px; }
+            .card { background: #f9f9f9; padding: 20px; border-radius: 8px; border: 1px solid #ddd; margin: 20px 0; }
+            .btn { display: inline-block; padding: 10px 20px; background-color: #ed4245; color: white; text-decoration: none; border-radius: 5px; font-weight: bold; }
+          </style>
+        </head>
+        <body>
+          <h1>データ削除請求（Data Deletion）</h1>
+          <p>本サービスに格納されているあなたの個人データ（Discord ID、GitHub ユーザー名、トークン情報等）の削除を行うことができます。</p>
+
+          <div class="card">
+            <h3>方法 1: 即時自動削除（推奨）</h3>
+            <p>以下のボタンよりDiscord認証を行うことで、Discord側の連携メタデータおよびデータベース（Cloudflare D1）内のユーザーデータが即座に完全削除されます。</p>
+            <p><a href="/unlink" class="btn">連携解除とデータ削除を実行</a></p>
+          </div>
+
+          <div class="card">
+            <h3>方法 2: 手動削除リクエスト</h3>
+            <p>自動解除が利用できない場合や問い合わせによる削除をご希望の場合は、Discord Appsの設定ページより連携アプリの認証を取り消すか、管理者までお問い合わせください。</p>
+          </div>
+
+          <p><a href="/link" style="color: #5865F2;">トップページへ戻る</a></p>
+        </body>
+        </html>
+      `, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+    }
+
+    // 0-0. 同意トップページ
     if (url.pathname === "/link") {
       return new Response(`
         <!DOCTYPE html>
@@ -95,7 +133,7 @@ export default {
             body { font-family: sans-serif; text-align: center; padding-top: 50px; color: #333; }
             .card { max-width: 500px; margin: 0 auto; padding: 30px; border: 1px solid #e0e0e0; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
             .links { margin: 20px 0; }
-            .links a { margin: 0 10px; color: #5865F2; font-weight: bold; }
+            .links a { margin: 0 8px; color: #5865F2; font-weight: bold; text-decoration: none; }
             .btn { display: inline-block; padding: 12px 24px; background-color: #5865F2; color: white; text-decoration: none; border-radius: 5px; font-weight: bold; }
           </style>
         </head>
@@ -105,7 +143,8 @@ export default {
             <p>連携を開始する前に、以下の規約とポリシーをご確認ください。</p>
             <div class="links">
               <a href="/terms" target="_blank">利用規約</a> | 
-              <a href="/privacy" target="_blank">プライバシーポリシー</a>
+              <a href="/privacy" target="_blank">プライバシーポリシー</a> | 
+              <a href="/data-deletion" target="_blank">データ削除請求</a>
             </div>
             <p style="margin-top: 30px;">
               <a href="/linked-role" class="btn">同意して連携を開始する</a>
@@ -140,7 +179,7 @@ export default {
       return Response.redirect(githubAuthUrl, 302);
     }
 
-    // 連携解除の処理開始（Discord認証へ飛ばしてユーザー識別を行う）
+    // 連携解除の処理開始
     if (url.pathname === "/unlink") {
       const unlinkRedirectUri = `${url.origin}/unlink-callback`;
       const discordAuthUrl = `https://discord.com/oauth2/authorize?client_id=${env.DISCORD_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(unlinkRedirectUri)}&scope=role_connections.write%20identify`;
@@ -274,7 +313,8 @@ export default {
         return new Response(`
           <html>
             <body style="font-family: sans-serif; text-align: center; padding-top: 50px;">
-              <h1>このタブを安全に閉じることができます</h1><script>window.close()</script>
+              <h2>連携完了</h2>
+              <p>このタブを安全に閉じることができます</p>
             </body>
           </html>
         `, {
@@ -299,7 +339,6 @@ export default {
       try {
         let accessToken = user.access_token;
 
-        // トークンの有効性を維持するため、事前にリフレッシュを試行
         try {
           const refreshed = await refreshDiscordToken(user.refresh_token, env);
           accessToken = refreshed.access_token;
@@ -319,7 +358,6 @@ export default {
         const daysInactive = Math.floor((now - lastActiveTime) / (1000 * 60 * 60 * 24));
         const remainingDays = 30 - daysInactive;
 
-        // 更新実行
         await updateDiscordRoleConnection(
           accessToken,
           env.DISCORD_CLIENT_ID,
@@ -373,7 +411,7 @@ async function registerRoleConnectionMetadata(env) {
         Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ body }),
     });
   } catch (e) {
     console.error("Failed to register role connection metadata:", e);
