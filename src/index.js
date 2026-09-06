@@ -2,15 +2,116 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // 0-0. 利用規約・プライバシーポリシー同意ページ
+    // 0-0. 利用規約 ページ (直打ち/リンクで閲覧可能)
+    if (url.pathname === "/terms") {
+      return new Response(`
+        <!DOCTYPE html>
+        <html lang="ja">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>利用規約</title>
+          <style>
+            body { font-family: sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; line-height: 1.6; color: #333; }
+            h1 { border-bottom: 2px solid #5865F2; padding-bottom: 10px; }
+            h2 { margin-top: 20px; font-size: 1.1rem; }
+            .btn { display: inline-block; padding: 10px 20px; background-color: #5865F2; color: white; text-decoration: none; border-radius: 5px; margin-top: 20px; }
+          </style>
+        </head>
+        <body>
+          <h1>利用規約</h1>
+          <p>本サービスは、GitHubのアクティビティ状況に応じてDiscordのロール連携メタデータを自動更新するサービスです。</p>
+          
+          <h2>1. 規約への同意</h2>
+          <p>ユーザーは、本サービスを利用することにより、本規約に同意したものとみなされます。</p>
+
+          <h2>2. 連携データおよび機能</h2>
+          <p>本サービスは、ユーザーのGitHubアクティビティ履歴を照会し、直近30日以内の活動の有無をDiscordに送信します。</p>
+
+          <h2>3. 免責事項</h2>
+          <p>本サービスは現状有姿で提供され、障害やエラー等によりデータが正常に同期されなかった場合でも、開発者は一切の責任を負いません。</p>
+
+          <h2>4. サービスの変更・終了</h2>
+          <p>運営上の理由やAPI仕様の変更等により、事前の通知なくサービス内容の変更または提供を終了する場合があります。</p>
+
+          <p><a href="/link" class="btn">同意画面へ戻る</a></p>
+        </body>
+        </html>
+      `, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+    }
+
+    // 0-0. プライバシーポリシー ページ (直打ち/リンクで閲覧可能)
+    if (url.pathname === "/privacy") {
+      return new Response(`
+        <!DOCTYPE html>
+        <html lang="ja">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>プライバシーポリシー</title>
+          <style>
+            body { font-family: sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; line-height: 1.6; color: #333; }
+            h1 { border-bottom: 2px solid #5865F2; padding-bottom: 10px; }
+            h2 { margin-top: 20px; font-size: 1.1rem; }
+            .btn { display: inline-block; padding: 10px 20px; background-color: #5865F2; color: white; text-decoration: none; border-radius: 5px; margin-top: 20px; }
+          </style>
+        </head>
+        <body>
+          <h1>プライバシーポリシー</h1>
+
+          <h2>1. 取得する情報</h2>
+          <p>本サービスでは、以下の情報を取得・保存します。</p>
+          <ul>
+            <li>Discord ユーザーID、OAuthアクセストークン、リフレッシュトークン</li>
+            <li>GitHub ユーザー名、OAuthアクセストークン</li>
+            <li>GitHub上の最終アクティビティ日時および警告送信フラグ</li>
+          </ul>
+
+          <h2>2. データの利用目的</h2>
+          <p>取得した情報は、GitHubのアクティビティを判定し、Discord Linked Roleメタデータを適切に同期・更新するためにのみ利用します。</p>
+
+          <h2>3. データの保管と第三者提供</h2>
+          <p>ユーザーデータは暗号化された安全なデータベース（Cloudflare D1）にて保管されます。法令に基づく場合を除き、第三者に提供・売却することはありません。</p>
+
+          <h2>4. データの削除（連携解除）</h2>
+          <p>ユーザーはいつでも <code>/unlink</code> エンドポイントにアクセスすることで、保存された個人データおよびDiscord連携情報を完全に削除できます。</p>
+
+          <p><a href="/link" class="btn">同意画面へ戻る</a></p>
+        </body>
+        </html>
+      `, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+    }
+
+    // 0-0. 同意トップページ（規約・ポリシーへのリンクを直で表示）
     if (url.pathname === "/link") {
       return new Response(`
-        <html>
-          <body style="font-family: sans-serif; text-align: center; padding-top: 50px;">
-            <h2>利用規約・プライバシーポリシー</h2>
-            <p><a href="https://github.com/minamiiwatobipengin/GitHub-Discord-Link/tree/main" target="_blank" rel="noopener noreferrer">利用規約・プライバシーポリシーを確認する</a></p>
-            <p><a href="/linked-role" style="display: inline-block; padding: 10px 20px; background-color: #5865F2; color: white; text-decoration: none; border-radius: 5px;">同意して連携を開始</a></p>
-          </body>
+        <!DOCTYPE html>
+        <html lang="ja">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>連携確認</title>
+          <style>
+            body { font-family: sans-serif; text-align: center; padding-top: 50px; color: #333; }
+            .card { max-width: 500px; margin: 0 auto; padding: 30px; border: 1px solid #e0e0e0; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+            .links { margin: 20px 0; }
+            .links a { margin: 0 10px; color: #5865F2; font-weight: bold; }
+            .btn { display: inline-block; padding: 12px 24px; background-color: #5865F2; color: white; text-decoration: none; border-radius: 5px; font-weight: bold; }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <h2>GitHub × Discord 連携</h2>
+            <p>連携を開始する前に、以下の規約とポリシーをご確認ください。</p>
+            <div class="links">
+              <a href="/terms" target="_blank">利用規約</a> | 
+              <a href="/privacy" target="_blank">プライバシーポリシー</a>
+            </div>
+            <p style="margin-top: 30px;">
+              <a href="/linked-role" class="btn">同意して連携を開始する</a>
+            </p>
+          </div>
+        </body>
         </html>
       `, {
         headers: { "Content-Type": "text/html; charset=utf-8" }
