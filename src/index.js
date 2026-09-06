@@ -405,16 +405,22 @@ async function registerRoleConnectionMetadata(env) {
       }
     ];
 
-    await fetch(url, {
+    const res = await fetch(url, {
       method: "PUT",
       headers: {
         Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ body }),
+      body: JSON.stringify(body), // 修正箇所
     });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`API Error (${res.status}): ${errText}`);
+    }
   } catch (e) {
     console.error("Failed to register role connection metadata:", e);
+    throw e;
   }
 }
 
