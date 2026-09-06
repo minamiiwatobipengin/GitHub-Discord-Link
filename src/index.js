@@ -274,8 +274,7 @@ export default {
         return new Response(`
           <html>
             <body style="font-family: sans-serif; text-align: center; padding-top: 50px;">
-              <h2>連携完了</h2>
-              <p>このタブを安全に閉じることができます</p>
+              <h1>このタブを安全に閉じることができます</h1><script>window.close()</script>
             </body>
           </html>
         `, {
