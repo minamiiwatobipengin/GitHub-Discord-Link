@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS users (
   access_token TEXT NOT NULL,
   refresh_token TEXT NOT NULL,
   github_username TEXT NOT NULL,
+  github_access_token TEXT,
   last_active_at TEXT NOT NULL,
   warned_at TEXT
 );

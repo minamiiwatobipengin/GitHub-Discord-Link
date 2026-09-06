@@ -478,6 +478,11 @@ async function getGitHubUserMetricsGraphQL(username, accessToken) {
     if (!res.ok) return { lastActiveAt: null };
 
     const resData = await res.json();
+    if (resData.errors?.length) {
+      console.error(`GitHub GraphQL query error: ${JSON.stringify(resData.errors)}`);
+      return { lastActiveAt: null };
+    }
+
     const weeks = resData.data?.user?.contributionsCollection?.contributionCalendar?.weeks;
 
     if (!weeks) return { lastActiveAt: null };
@@ -487,7 +492,7 @@ async function getGitHubUserMetricsGraphQL(username, accessToken) {
       const days = weeks[i].contributionDays;
       for (let j = days.length - 1; j >= 0; j--) {
         if (days[j].contributionCount > 0) {
-          lastActiveDate = `${days[j].date}T23:59:59.000Z`;
+          lastActiveDate = `${days[j].date}T00:00:00.000Z`;
           break;
         }
       }
