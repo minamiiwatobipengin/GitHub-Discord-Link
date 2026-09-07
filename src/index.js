@@ -1,4 +1,5 @@
 export default {
+  // 0. 各種ルーティング処理
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
@@ -83,7 +84,7 @@ export default {
       `, { headers: { "Content-Type": "text/html; charset=utf-8" } });
     }
 
-    // ★追加: データ削除請求（Data Deletion Request）ページ
+    // データ削除請求（Data Deletion Request）ページ
     if (url.pathname === "/data-deletion") {
       return new Response(`
         <!DOCTYPE html>
@@ -279,16 +280,11 @@ export default {
 
         const githubMetrics = await getGitHubUserMetricsGraphQL(githubUsername, githubAccessToken);
         
-        const now = Date.now();
-        const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
-        
-        let isActive = false;
-        if (githubMetrics.lastActiveAt) {
-          const lastActiveTime = new Date(githubMetrics.lastActiveAt).getTime();
-          isActive = (now - lastActiveTime) <= thirtyDaysMs && lastActiveTime <= now;
-        }
+        // 日付ベースの経過日数判定（修正箇所）
+        const daysInactive = getDaysInactive(githubMetrics.lastActiveAt);
+        const isActive = daysInactive <= 30;
 
-        const saveDate = githubMetrics.lastActiveAt || new Date(0).toISOString();
+        const saveDate = githubMetrics.lastActiveAt || "";
 
         await env.DB.prepare(`
           INSERT INTO users (discord_id, access_token, refresh_token, github_username, github_access_token, last_active_at, warned_at)
@@ -332,8 +328,6 @@ export default {
   // 4. 定期実行バッチ (Cron)
   async scheduled(event, env, ctx) {
     const { results: users } = await env.DB.prepare("SELECT * FROM users").all();
-    const now = Date.now();
-    const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
 
     for (const user of users) {
       try {
@@ -352,11 +346,19 @@ export default {
 
         const githubMetrics = await getGitHubUserMetricsGraphQL(user.github_username, user.github_access_token);
         
-        const lastActiveTime = githubMetrics.lastActiveAt ? new Date(githubMetrics.lastActiveAt).getTime() : 0;
-        const isActive = (now - lastActiveTime) <= thirtyDaysMs && lastActiveTime > 0;
-
-        const daysInactive = Math.floor((now - lastActiveTime) / (1000 * 60 * 60 * 24));
+        // 日付ベースの経過日数判定（修正箇所）
+        const daysInactive = getDaysInactive(githubMetrics.lastActiveAt);
+        const isActive = daysInactive <= 30;
         const remainingDays = 30 - daysInactive;
+
+        // 最新のアクティビティ情報でDBを更新（アクティブ復帰時は warned_at もクリア）
+        if (githubMetrics.lastActiveAt) {
+          await env.DB.prepare(`
+            UPDATE users 
+            SET last_active_at = ?, warned_at = CASE WHEN ? THEN NULL ELSE warned_at END 
+            WHERE discord_id = ?
+          `).bind(githubMetrics.lastActiveAt, isActive, user.discord_id).run();
+        }
 
         await updateDiscordRoleConnection(
           accessToken,
@@ -393,6 +395,20 @@ export default {
 
 /* --- ヘルパー関数群 --- */
 
+// YYYY-MM-DD 文字列から経過日数を判定（追加）
+function getDaysInactive(lastActiveAtStr) {
+  if (!lastActiveAtStr) return 999;
+  
+  const today = new Date();
+  const todayUtc = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate());
+  
+  const [year, month, day] = lastActiveAtStr.split("-").map(Number);
+  const activeUtc = Date.UTC(year, month - 1, day);
+
+  const diffMs = todayUtc - activeUtc;
+  return Math.floor(diffMs / (1000 * 60 * 60 * 24));
+}
+
 async function registerRoleConnectionMetadata(env) {
   try {
     const url = `https://discord.com/api/v10/applications/${env.DISCORD_CLIENT_ID}/role-connections/metadata`;
@@ -411,7 +427,7 @@ async function registerRoleConnectionMetadata(env) {
         Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(body), // 修正箇所
+      body: JSON.stringify(body),
     });
 
     if (!res.ok) {
@@ -484,7 +500,6 @@ async function getGitHubUserMetricsGraphQL(username, accessToken) {
     }
 
     const weeks = resData.data?.user?.contributionsCollection?.contributionCalendar?.weeks;
-
     if (!weeks) return { lastActiveAt: null };
 
     let lastActiveDate = null;
@@ -492,7 +507,8 @@ async function getGitHubUserMetricsGraphQL(username, accessToken) {
       const days = weeks[i].contributionDays;
       for (let j = days.length - 1; j >= 0; j--) {
         if (days[j].contributionCount > 0) {
-          lastActiveDate = `${days[j].date}T00:00:00.000Z`;
+          // ISO文字列変換をやめ、'YYYY-MM-DD' を返す（修正箇所）
+          lastActiveDate = days[j].date;
           break;
         }
       }
